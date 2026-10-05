@@ -141,6 +141,28 @@ codeunit 134620 "Report Theme Generator Tests"
     end;
 
     [Test]
+    procedure BoldHeaderFillsHeaderRowWithAccent()
+    var
+        ReportThemeGenerator: Codeunit "Report Theme Generator";
+        GeneratedTheme: Codeunit "Temp Blob";
+        HeaderRow: Text;
+    begin
+        // [SCENARIO] The Bold header table style fills the BCDataTable header row with a 40% tint of Accent 3
+        // and draws the header and totals rules in Accent 3. Colours refer to the theme, with the hex as fallback.
+        ReportThemeGenerator.SetColor("Report Theme Color Slot"::Accent3, 'C2502A');
+        ReportThemeGenerator.SetTableStyle("Report Theme Table Style"::BoldHeader);
+
+        Generate(ReportThemeGenerator, DefaultThemeTok, GeneratedTheme);
+
+        HeaderRow := '/w:styles/w:style[@w:styleId=''BCDataTable'']/w:tblStylePr[@w:type=''firstRow'']';
+        Assert.AreEqual('accent3', GetValue(GeneratedTheme, StylesEntryTok, HeaderRow + '/w:tcPr/w:shd/@w:themeFill'), 'Header fill theme colour');
+        Assert.AreEqual('E7B9AA', GetValue(GeneratedTheme, StylesEntryTok, HeaderRow + '/w:tcPr/w:shd/@w:fill'), 'Header fill fallback is the 40% tint');
+        Assert.AreEqual('66', GetValue(GeneratedTheme, StylesEntryTok, HeaderRow + '/w:tcPr/w:shd/@w:themeFillTint'), 'Header fill tint');
+        Assert.AreEqual('accent3', GetValue(GeneratedTheme, StylesEntryTok, HeaderRow + '/w:tcPr/w:tcBorders/w:bottom/@w:themeColor'), 'Header rule');
+        Assert.AreEqual('accent3', GetValue(GeneratedTheme, StylesEntryTok, '/w:styles/w:style[@w:styleId=''BCTotalsTable'']/w:tblStylePr[@w:type=''lastRow'']/w:tcPr/w:tcBorders/w:bottom/@w:themeColor'), 'Totals rule');
+    end;
+
+    [Test]
     procedure InvalidColorIsRejected()
     var
         ReportThemeGenerator: Codeunit "Report Theme Generator";

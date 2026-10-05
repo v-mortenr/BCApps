@@ -27,6 +27,8 @@ codeunit 9667 "Report Theme Generator"
         BodyFont: Text;
         PageColor: Text;
         ThemeName: Text;
+        BaseColors: Dictionary of [Text, Text];
+        TableStyle: Enum "Report Theme Table Style";
         BaseFontSizeHalfPoints: Integer;
         FontsSet: Boolean;
         PageColorSet: Boolean;
@@ -79,6 +81,14 @@ codeunit 9667 "Report Theme Generator"
         this.ThemeName := NewThemeName.Trim();
     end;
 
+    /// <summary>
+    /// Restyles the BC table styles used by the Body layouts. Colours refer to the theme, so they follow the palette.
+    /// </summary>
+    procedure SetTableStyle(NewTableStyle: Enum "Report Theme Table Style")
+    begin
+        this.TableStyle := NewTableStyle;
+    end;
+
     procedure Generate(BaseTheme: InStream; var GeneratedTheme: Codeunit "Temp Blob")
     var
         Source: Codeunit "Data Compression";
@@ -93,8 +103,12 @@ codeunit 9667 "Report Theme Generator"
         Source.GetEntryList(EntryList);
         if not EntryList.Contains(ThemeEntryTxt) then
             Error(NotAThemeErr, ThemeEntryTxt);
-        if (this.BaseFontSizeHalfPoints <> 0) and not EntryList.Contains(StylesEntryTxt) then
+        if this.StylesNeedPatching() and not EntryList.Contains(StylesEntryTxt) then
             Error(NotAThemeErr, StylesEntryTxt);
+        if this.TableStyle <> this.TableStyle::KeepBase then begin
+            Source.ExtractEntry(ThemeEntryTxt, EntryBlob);
+            this.LoadBaseColors(EntryBlob);
+        end;
 
         Target.CreateZipArchive();
         foreach EntryName in EntryList do
@@ -120,7 +134,7 @@ codeunit 9667 "Report Theme Generator"
                 if (this.Colors.Count() = 0) and not this.FontsSet and (this.ThemeName = '') then
                     exit;
             StylesEntryTxt:
-                if this.BaseFontSizeHalfPoints = 0 then
+                if not this.StylesNeedPatching() then
                     exit;
             DocumentEntryTxt:
                 if not this.PageColorSet then
@@ -201,12 +215,229 @@ codeunit 9667 "Report Theme Generator"
     begin
         if not Document.SelectSingleNode('/w:styles', NamespaceManager, Node) then
             exit;
-        // docDefaults is the first child of w:styles and rPrDefault the first child of docDefaults.
-        RunProperties := this.GetOrAddFirstChild(Node.AsXmlElement(), NamespaceManager, 'docDefaults');
-        RunProperties := this.GetOrAddFirstChild(RunProperties, NamespaceManager, 'rPrDefault');
-        RunProperties := this.GetOrAddFirstChild(RunProperties, NamespaceManager, 'rPr');
-        this.SetRunPropertyValue(RunProperties, NamespaceManager, 'sz');
-        this.SetRunPropertyValue(RunProperties, NamespaceManager, 'szCs');
+        if this.BaseFontSizeHalfPoints <> 0 then begin
+            // docDefaults is the first child of w:styles and rPrDefault the first child of docDefaults.
+            RunProperties := this.GetOrAddFirstChild(Node.AsXmlElement(), NamespaceManager, 'docDefaults');
+            RunProperties := this.GetOrAddFirstChild(RunProperties, NamespaceManager, 'rPrDefault');
+            RunProperties := this.GetOrAddFirstChild(RunProperties, NamespaceManager, 'rPr');
+            this.SetRunPropertyValue(RunProperties, NamespaceManager, 'sz');
+            this.SetRunPropertyValue(RunProperties, NamespaceManager, 'szCs');
+        end;
+        this.PatchTableStyles(Document, NamespaceManager);
+    end;
+
+    local procedure StylesNeedPatching(): Boolean
+    begin
+        exit((this.BaseFontSizeHalfPoints <> 0) or (this.TableStyle <> this.TableStyle::KeepBase));
+    end;
+
+    local procedure PatchTableStyles(var Document: XmlDocument; NamespaceManager: XmlNamespaceManager)
+    var
+        Part: XmlElement;
+    begin
+        case this.TableStyle of
+            this.TableStyle::Minimal:
+                begin
+                    if this.GetTableStylePart(Document, NamespaceManager, 'BCDataTable', 'band2Horz', Part) then
+                        this.SetShading(Part, NamespaceManager, '', 0);
+                    if this.GetTableStylePart(Document, NamespaceManager, 'BCBlockTable', 'band1Horz', Part) then
+                        this.SetShading(Part, NamespaceManager, '', 0);
+                end;
+            this.TableStyle::Banded:
+                if this.GetTableStylePart(Document, NamespaceManager, 'BCDataTable', 'band2Horz', Part) then
+                    this.SetShading(Part, NamespaceManager, 'accent1', 0);
+            this.TableStyle::AccentLines:
+                begin
+                    if this.GetTableStylePart(Document, NamespaceManager, 'BCDataTable', 'firstRow', Part) then
+                        this.SetBorder(Part, NamespaceManager, 'bottom', 'accent3', 12);
+                    this.SetAccentTotals(Document, NamespaceManager);
+                end;
+            this.TableStyle::BoldHeader:
+                begin
+                    // A tint keeps the default dark text readable: paragraph styles such as Normal set the text colour,
+                    // and in Word they beat table-style formatting, so white header text cannot be forced from here.
+                    if this.GetTableStylePart(Document, NamespaceManager, 'BCDataTable', 'firstRow', Part) then begin
+                        this.SetShading(Part, NamespaceManager, 'accent3', 102);
+                        this.SetBorder(Part, NamespaceManager, 'bottom', 'accent3', 12);
+                    end;
+                    if this.GetTableStylePart(Document, NamespaceManager, 'BCDataTable', 'band2Horz', Part) then
+                        this.SetShading(Part, NamespaceManager, 'accent1', 0);
+                    this.SetAccentTotals(Document, NamespaceManager);
+                end;
+        end;
+    end;
+
+    // Only borders and fills are restyled: text colour set in a table style loses to the paragraph style
+    // (Normal sets text1 in the shipped themes), so it would not show.
+    local procedure SetAccentTotals(var Document: XmlDocument; NamespaceManager: XmlNamespaceManager)
+    var
+        Part: XmlElement;
+    begin
+        if this.GetTableStylePart(Document, NamespaceManager, 'BCTotalsTable', 'lastRow', Part) then begin
+            this.SetBorder(Part, NamespaceManager, 'top', 'accent3', 4);
+            this.SetBorder(Part, NamespaceManager, 'bottom', 'accent3', 12);
+        end;
+    end;
+    local procedure GetTableStylePart(var Document: XmlDocument; NamespaceManager: XmlNamespaceManager; StyleId: Text; PartType: Text; var Part: XmlElement): Boolean
+    var
+        Node: XmlNode;
+        Style: XmlElement;
+    begin
+        if not Document.SelectSingleNode(StrSubstNo('/w:styles/w:style[@w:styleId=''%1'']', StyleId), NamespaceManager, Node) then
+            exit(false);
+        Style := Node.AsXmlElement();
+        if Style.SelectSingleNode(StrSubstNo('w:tblStylePr[@w:type=''%1'']', PartType), NamespaceManager, Node) then begin
+            Part := Node.AsXmlElement();
+            exit(true);
+        end;
+        // tblStylePr elements are the last children of w:style.
+        Part := XmlElement.Create('tblStylePr', WordNamespaceTxt);
+        Part.SetAttribute('type', WordNamespaceTxt, PartType);
+        Style.Add(Part);
+        exit(true);
+    end;
+
+    // Tint is 0-255 as in w:themeFillTint (the share of the colour kept); 0 means the full colour.
+    local procedure SetShading(Part: XmlElement; NamespaceManager: XmlNamespaceManager; ThemeColor: Text; Tint: Integer)
+    var
+        Shading: XmlElement;
+    begin
+        Shading := this.GetOrAddChild(this.GetCellProperties(Part, NamespaceManager), NamespaceManager, 'shd', 'noWrap,tcMar,textDirection,tcFitText,vAlign,hideMark');
+        Shading.RemoveAttribute('themeFill', WordNamespaceTxt);
+        Shading.RemoveAttribute('themeFillTint', WordNamespaceTxt);
+        Shading.RemoveAttribute('themeFillShade', WordNamespaceTxt);
+        Shading.SetAttribute('val', WordNamespaceTxt, 'clear');
+        Shading.SetAttribute('color', WordNamespaceTxt, 'auto');
+        if ThemeColor = '' then
+            Shading.SetAttribute('fill', WordNamespaceTxt, 'auto')
+        else begin
+            Shading.SetAttribute('fill', WordNamespaceTxt, this.TintColor(this.EffectiveColor(ThemeColor), Tint));
+            Shading.SetAttribute('themeFill', WordNamespaceTxt, ThemeColor);
+            if Tint <> 0 then
+                Shading.SetAttribute('themeFillTint', WordNamespaceTxt, this.ByteToHex(Tint));
+        end;
+    end;
+
+    // An empty ThemeColor removes the border.
+    local procedure SetBorder(Part: XmlElement; NamespaceManager: XmlNamespaceManager; Side: Text; ThemeColor: Text; EighthPoints: Integer)
+    var
+        Borders: XmlElement;
+        Border: XmlElement;
+        Following: Text;
+    begin
+        Borders := this.GetOrAddChild(this.GetCellProperties(Part, NamespaceManager), NamespaceManager, 'tcBorders', 'shd,noWrap,tcMar,textDirection,tcFitText,vAlign,hideMark');
+        if Side = 'top' then
+            Following := 'start,left,bottom,end,right,insideH,insideV,tl2br,tr2bl'
+        else
+            Following := 'end,right,insideH,insideV,tl2br,tr2bl';
+        Border := this.GetOrAddChild(Borders, NamespaceManager, Side, Following);
+        Border.RemoveAllAttributes();
+        if ThemeColor = '' then begin
+            Border.SetAttribute('val', WordNamespaceTxt, 'nil');
+            exit;
+        end;
+        Border.SetAttribute('val', WordNamespaceTxt, 'single');
+        Border.SetAttribute('sz', WordNamespaceTxt, Format(EighthPoints, 0, 9));
+        Border.SetAttribute('space', WordNamespaceTxt, '0');
+        Border.SetAttribute('color', WordNamespaceTxt, this.EffectiveColor(ThemeColor));
+        Border.SetAttribute('themeColor', WordNamespaceTxt, ThemeColor);
+    end;
+
+    local procedure TintColor(HexColor: Text; Tint: Integer): Text
+    var
+        Channel: Integer;
+        Result: Text;
+    begin
+        if Tint = 0 then
+            exit(HexColor);
+        for Channel := 0 to 2 do
+            Result += this.ByteToHex(255 - Round((255 - this.HexToByte(CopyStr(HexColor, Channel * 2 + 1, 2))) * Tint / 255, 1));
+        exit(Result);
+    end;
+
+    local procedure HexToByte(Hex: Text): Integer
+    begin
+        exit((StrPos('0123456789ABCDEF', Hex[1]) - 1) * 16 + StrPos('0123456789ABCDEF', Hex[2]) - 1);
+    end;
+
+    local procedure ByteToHex(Value: Integer): Text
+    var
+        Digits: Text;
+    begin
+        Digits := '0123456789ABCDEF';
+        exit(Format(Digits[Value div 16 + 1]) + Format(Digits[Value mod 16 + 1]));
+    end;
+
+    local procedure GetCellProperties(Part: XmlElement; NamespaceManager: XmlNamespaceManager): XmlElement
+    begin
+        exit(this.GetOrAddChild(Part, NamespaceManager, 'tcPr', ''));
+    end;
+
+    local procedure GetOrAddChild(Parent: XmlElement; NamespaceManager: XmlNamespaceManager; ElementName: Text; FollowingNames: Text): XmlElement
+    var
+        Node: XmlNode;
+        Child: XmlElement;
+        FollowingList: List of [Text];
+        FollowingName: Text;
+    begin
+        if Parent.SelectSingleNode('w:' + ElementName, NamespaceManager, Node) then
+            exit(Node.AsXmlElement());
+        Child := XmlElement.Create(ElementName, WordNamespaceTxt);
+        if FollowingNames <> '' then
+            foreach FollowingName in FollowingNames.Split(',') do
+                FollowingList.Add('w:' + FollowingName);
+        this.InsertBeforeFirst(Parent, NamespaceManager, Child, FollowingList);
+        exit(Child);
+    end;
+
+    local procedure LoadBaseColors(ThemeBlob: Codeunit "Temp Blob")
+    var
+        Document: XmlDocument;
+        NamespaceManager: XmlNamespaceManager;
+        Node: XmlNode;
+        Slot: Integer;
+        SlotName: Text;
+    begin
+        Clear(this.BaseColors);
+        if not XmlDocument.ReadFrom(ThemeBlob.CreateInStream(TextEncoding::UTF8), Document) then
+            Error(NotAThemeErr, ThemeEntryTxt);
+        NamespaceManager.NameTable(Document.NameTable());
+        NamespaceManager.AddNamespace('a', DrawingNamespaceTxt);
+        for Slot := 0 to 11 do begin
+            SlotName := this.SlotElementName(Enum::"Report Theme Color Slot".FromInteger(Slot));
+            if Document.SelectSingleNode('//a:clrScheme/a:' + SlotName + '/a:srgbClr/@val', NamespaceManager, Node) then
+                this.BaseColors.Set(SlotName, Node.AsXmlAttribute().Value())
+            else
+                if Document.SelectSingleNode('//a:clrScheme/a:' + SlotName + '/a:sysClr/@lastClr', NamespaceManager, Node) then
+                    this.BaseColors.Set(SlotName, Node.AsXmlAttribute().Value());
+        end;
+    end;
+
+    // Hex of a WordprocessingML theme colour name in the generated theme, used as the fallback value next to w:themeColor.
+    local procedure EffectiveColor(ThemeColor: Text): Text
+    var
+        SlotName: Text;
+        Slot: Integer;
+    begin
+        case ThemeColor of
+            'text1':
+                SlotName := 'dk1';
+            'background1':
+                SlotName := 'lt1';
+            'text2':
+                SlotName := 'dk2';
+            'background2':
+                SlotName := 'lt2';
+            else
+                SlotName := ThemeColor;
+        end;
+        for Slot := 0 to 11 do
+            if this.SlotElementName(Enum::"Report Theme Color Slot".FromInteger(Slot)) = SlotName then
+                if this.Colors.ContainsKey(Slot) then
+                    exit(this.Colors.Get(Slot));
+        if this.BaseColors.ContainsKey(SlotName) then
+            exit(this.BaseColors.Get(SlotName));
+        exit('000000');
     end;
 
     local procedure SetRunPropertyValue(RunProperties: XmlElement; NamespaceManager: XmlNamespaceManager; ElementName: Text)
